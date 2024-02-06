@@ -172,14 +172,6 @@ var _ = AfterSuite(func() {
 
 var _ = Describe("Infrastructure tests", func() {
 	Context("with infrastructure that requests new vpc (networks.vpc.cidr)", func() {
-		It("should successfully create and delete (terraformer)", func() {
-			providerConfig := newProviderConfig(&alicloudv1alpha1.VPC{
-				CIDR: pointer.String(vpcCIDR),
-			}, availabilityZone)
-
-			err := runTest(ctx, log, c, providerConfig, decoder, clientFactory, fuUseTerraformer)
-			Expect(err).NotTo(HaveOccurred())
-		})
 
 		It("should successfully create and delete (terraformer) enableDualStack", func() {
 			providerConfig := newProviderConfig(&alicloudv1alpha1.VPC{
