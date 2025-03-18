@@ -244,6 +244,9 @@ func (c *actor) DeleteSecurityGroup(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	if sg == nil {
+		return nil
+	}
 	for _, rule := range sg.Rules {
 		if err := c.RevokeSecurityGroupRule(ctx, id, rule.SecurityGroupRuleId, rule.Direction); err != nil {
 			return err
@@ -454,10 +457,17 @@ func (c *actor) getSNatEntry(id, snatTableId string) (*SNATEntry, error) {
 }
 
 func (c *actor) DeleteSNatEntry(ctx context.Context, id, snatTableId string) error {
+	current, err := c.GetSNatEntry(ctx, id, snatTableId)
+	if err != nil {
+		return err
+	}
+	if current == nil {
+		return nil
+	}
 	req := vpc.CreateDeleteSnatEntryRequest()
 	req.SnatEntryId = id
 	req.SnatTableId = snatTableId
-	_, err := callApi(c.vpcClient.DeleteSnatEntry, req)
+	_, err = callApi(c.vpcClient.DeleteSnatEntry, req)
 	if err != nil {
 		return err
 	}
@@ -733,10 +743,17 @@ func (c *actor) FindNatGatewayByVPC(_ context.Context, vpcId string) (*NatGatewa
 }
 
 func (c *actor) DeleteNatGateway(ctx context.Context, id string) error {
+	current, err := c.GetNatGateway(ctx, id)
+	if err != nil {
+		return err
+	}
+	if current == nil {
+		return nil
+	}
 	req := vpc.CreateDeleteNatGatewayRequest()
 	req.NatGatewayId = id
 	req.Force = requests.NewBoolean(true)
-	_, err := callApi(c.vpcClient.DeleteNatGateway, req)
+	_, err = callApi(c.vpcClient.DeleteNatGateway, req)
 	if err != nil {
 		return err
 	}
@@ -777,10 +794,17 @@ func (c *actor) FindNatGatewayByTags(ctx context.Context, tags Tags) ([]*NatGate
 }
 
 func (c *actor) DeleteVSwitch(ctx context.Context, id string) error {
+	current, err := c.GetVSwitch(ctx, id)
+	if err != nil {
+		return err
+	}
+	if current == nil {
+		return nil
+	}
 	req := vpc.CreateDeleteVSwitchRequest()
 	req.VSwitchId = id
 
-	_, err := callApi(c.vpcClient.DeleteVSwitch, req)
+	_, err = callApi(c.vpcClient.DeleteVSwitch, req)
 	if err != nil {
 		return err
 	}
@@ -877,11 +901,18 @@ func (c *actor) ListVpcs(_ context.Context, ids []string) ([]*VPC, error) {
 }
 
 func (c *actor) DeleteVpc(ctx context.Context, id string) error {
+	current, err := c.GetVpc(ctx, id)
+	if err != nil {
+		return err
+	}
+	if current == nil {
+		return nil
+	}
 	req := vpc.CreateDeleteVpcRequest()
 	req.VpcId = id
 	req.ForceDelete = requests.NewBoolean(true)
 
-	_, err := callApi(c.vpcClient.DeleteVpc, req)
+	_, err = callApi(c.vpcClient.DeleteVpc, req)
 	if err != nil {
 		return err
 	}
