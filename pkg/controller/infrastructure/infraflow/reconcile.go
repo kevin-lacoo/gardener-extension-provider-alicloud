@@ -56,7 +56,7 @@ func (c *FlowContext) buildReconcileGraph() *flow.Graph {
 
 	ensureRouteTable := c.AddTask(g, "ensure route table",
 		c.ensureRouteTable,
-		DoIf(c.useCustomRouteTable()), Timeout(defaultTimeout), Dependencies(ensureNatGateway, ensureIpv6Gateway))
+		Timeout(defaultTimeout), Dependencies(ensureNatGateway, ensureIpv6Gateway))
 
 	_ = c.AddTask(g, "ensure zones",
 		c.ensureZones,
@@ -497,6 +497,31 @@ func (c *FlowContext) ensureIpv6Gateway(ctx context.Context) error {
 
 func (c *FlowContext) ensureRouteTable(ctx context.Context) error {
 	log := c.LogFromContext(ctx)
+	if !c.useCustomRouteTable() {
+		if c.config.Networks.VPC.ID == nil {
+			return nil
+		}
+		vpcId := c.config.Networks.VPC.ID
+		// Fetch all route tables once; matching is done per zone below.
+		tables, err := c.actor.ListRouteTablesByVPC(ctx, *vpcId)
+		if err != nil {
+			return fmt.Errorf("failed to list route tables for VPC %s: %w", *vpcId, err)
+		}
+		systemRTID := ""
+		for _, rt := range tables {
+			if rt.RouteTableType == "System" {
+				systemRTID = rt.RouteTableId
+				break
+			}
+		}
+		if systemRTID == "" {
+			return nil
+		}
+		log.Info("stored default route tables", "routeTableIDs", systemRTID)
+		c.state.Set(IdentifierRouteTable, systemRTID)
+		return c.PersistState(ctx, true)
+	}
+
 	vpcId := c.state.Get(IdentifierVPC)
 	natGwId := c.state.Get(IdentifierNatGateway)
 	if vpcId == nil || natGwId == nil {
