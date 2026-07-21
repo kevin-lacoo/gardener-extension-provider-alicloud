@@ -16,7 +16,6 @@ import (
 	"github.com/gardener/gardener/pkg/extensions"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"go.uber.org/mock/gomock"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,17 +33,12 @@ var _ = Describe("Bastion", func() {
 		cluster *extensions.Cluster
 		bastion *extensionsv1alpha1.Bastion
 
-		ctrl                 *gomock.Controller
 		maxLengthForResource int
 	)
 	BeforeEach(func() {
 		cluster = createOpenstackTestCluster()
 		bastion = createTestBastion()
-		ctrl = gomock.NewController(GinkgoT())
 		maxLengthForResource = 63
-	})
-	AfterEach(func() {
-		ctrl.Finish()
 	})
 
 	Describe("Determine options", func() {

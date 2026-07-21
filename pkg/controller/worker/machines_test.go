@@ -20,7 +20,6 @@ import (
 	extensionsv1alpha1 "github.com/gardener/gardener/pkg/apis/extensions/v1alpha1"
 	"github.com/gardener/gardener/pkg/client/kubernetes"
 	mockkubernetes "github.com/gardener/gardener/pkg/client/kubernetes/mock"
-	mockclient "github.com/gardener/gardener/third_party/mock/controller-runtime/client"
 	machinev1alpha1 "github.com/gardener/machine-controller-manager/pkg/apis/machine/v1alpha1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -33,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/gardener/gardener-extension-provider-alicloud/charts"
 	"github.com/gardener/gardener-extension-provider-alicloud/pkg/alicloud"
@@ -46,16 +46,12 @@ var _ = Describe("Machines", func() {
 		ctx = context.Background()
 
 		ctrl         *gomock.Controller
-		c            *mockclient.MockClient
-		statusWriter *mockclient.MockStatusWriter
+		c            client.Client
 		chartApplier *mockkubernetes.MockChartApplier
 	)
 
 	BeforeEach(func() {
 		ctrl = gomock.NewController(GinkgoT())
-
-		c = mockclient.NewMockClient(ctrl)
-		statusWriter = mockclient.NewMockStatusWriter(ctrl)
 		chartApplier = mockkubernetes.NewMockChartApplier(ctrl)
 	})
 
@@ -614,17 +610,22 @@ var _ = Describe("Machines", func() {
 				workerPoolHash3, _ = worker.WorkerPoolHash(w.Spec.Pools[2], cluster, nil, nil, nil)
 				workerPoolHash4, _ = worker.WorkerPoolHash(w.Spec.Pools[3], cluster, nil, nil, nil)
 
+				udScheme := runtime.NewScheme()
+				_ = corev1.AddToScheme(udScheme)
+				_ = extensionsv1alpha1.AddToScheme(udScheme)
+				udSecret := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: userDataSecretName},
+					Data:       map[string][]byte{userDataSecretDataKey: userData},
+				}
+				w.Name = "worker"
+				c = fakeclient.NewClientBuilder().
+					WithScheme(udScheme).
+					WithObjects(udSecret, w).
+					WithStatusSubresource(&extensionsv1alpha1.Worker{}).
+					Build()
+
 				workerDelegate, _ = NewWorkerDelegate(c, decoder, scheme, chartApplier, "", w, clusterWithoutImages)
 			})
-
-			expectedUserDataSecretRefRead := func() {
-				c.EXPECT().Get(ctx, client.ObjectKey{Namespace: namespace, Name: userDataSecretName}, gomock.AssignableToTypeOf(&corev1.Secret{})).DoAndReturn(
-					func(_ context.Context, _ client.ObjectKey, secret *corev1.Secret, _ ...client.GetOption) error {
-						secret.Data = map[string][]byte{userDataSecretDataKey: userData}
-						return nil
-					},
-				)
-			}
 
 			Describe("machine images", func() {
 				var (
@@ -961,11 +962,6 @@ var _ = Describe("Machines", func() {
 				It("should return the expected machine deployments for profile image types", func() {
 					workerDelegate, _ = NewWorkerDelegate(c, decoder, scheme, chartApplier, "", w, cluster)
 
-					expectedUserDataSecretRefRead()
-					expectedUserDataSecretRefRead()
-					expectedUserDataSecretRefRead()
-					expectedUserDataSecretRefRead()
-
 					chartApplier.EXPECT().
 						ApplyFromEmbeddedFS(
 							ctx,
@@ -1009,17 +1005,15 @@ var _ = Describe("Machines", func() {
 						Object: expectedImages,
 					}
 
-					c.EXPECT().Status().Return(statusWriter)
-					statusWriter.EXPECT().Patch(ctx, gomock.AssignableToTypeOf(&extensionsv1alpha1.Worker{}), gomock.Any()).DoAndReturn(
-						func(_ context.Context, obj *extensionsv1alpha1.Worker, _ client.Patch, _ ...client.PatchOption) error {
-							Expect(obj.Status.ProviderStatus).To(Equal(&runtime.RawExtension{
-								Object: expectedImages,
-							}))
-							return nil
-						},
-					)
 					err = workerDelegate.UpdateMachineImagesStatus(ctx)
 					Expect(err).NotTo(HaveOccurred())
+
+					updated := &extensionsv1alpha1.Worker{}
+					Expect(c.Get(ctx, client.ObjectKeyFromObject(w), updated)).To(Succeed())
+					Expect(updated.Status.ProviderStatus).NotTo(BeNil())
+					gotStatus := &apiv1alpha1.WorkerStatus{}
+					Expect(json.Unmarshal(updated.Status.ProviderStatus.Raw, gotStatus)).To(Succeed())
+					Expect(gotStatus.MachineImages).To(Equal(expectedImages.MachineImages))
 
 					// Test workerDelegate.GenerateMachineDeployments()
 					result, err := workerDelegate.GenerateMachineDeployments(ctx)
@@ -1096,8 +1090,6 @@ var _ = Describe("Machines", func() {
 
 				workerDelegate, _ = NewWorkerDelegate(c, decoder, scheme, chartApplier, "", w, cluster)
 
-				expectedUserDataSecretRefRead()
-
 				result, err := workerDelegate.GenerateMachineDeployments(ctx)
 				Expect(err).To(HaveOccurred())
 				Expect(result).To(BeNil())
@@ -1129,11 +1121,6 @@ var _ = Describe("Machines", func() {
 
 				workerDelegate, _ = NewWorkerDelegate(c, decoder, scheme, chartApplier, "", w, cluster)
 
-				expectedUserDataSecretRefRead()
-				expectedUserDataSecretRefRead()
-				expectedUserDataSecretRefRead()
-				expectedUserDataSecretRefRead()
-
 				result, err := workerDelegate.GenerateMachineDeployments(ctx)
 				resultSettings := result[0].MachineConfiguration
 				resultNodeConditions := strings.Join(testNodeConditions, ",")
@@ -1156,11 +1143,6 @@ var _ = Describe("Machines", func() {
 				}
 				w.Spec.Pools[1].ClusterAutoscaler = nil
 				workerDelegate, _ = NewWorkerDelegate(c, decoder, scheme, chartApplier, "", w, cluster)
-
-				expectedUserDataSecretRefRead()
-				expectedUserDataSecretRefRead()
-				expectedUserDataSecretRefRead()
-				expectedUserDataSecretRefRead()
 
 				result, err := workerDelegate.GenerateMachineDeployments(ctx)
 				Expect(err).NotTo(HaveOccurred())

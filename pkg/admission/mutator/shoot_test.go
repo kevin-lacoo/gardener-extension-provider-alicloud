@@ -16,7 +16,6 @@ import (
 	"github.com/gardener/gardener/pkg/controllerutils"
 	testutils "github.com/gardener/gardener/pkg/utils/test"
 	. "github.com/gardener/gardener/pkg/utils/test/matchers"
-	mockclient "github.com/gardener/gardener/third_party/mock/controller-runtime/client"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"go.uber.org/mock/gomock"
@@ -25,7 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer/json"
 	"k8s.io/utils/ptr"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	alimutator "github.com/gardener/gardener-extension-provider-alicloud/pkg/admission/mutator"
 	"github.com/gardener/gardener-extension-provider-alicloud/pkg/alicloud"
@@ -62,10 +61,7 @@ var _ = Describe("Mutating Shoot", func() {
 		mutator               extensionswebhook.Mutator
 		ctx                   context.Context
 		ctrl                  *gomock.Controller
-		c                     *mockclient.MockClient
-		mgr                   *testutils.FakeManager
 		scheme                *runtime.Scheme
-		apiReader             *mockclient.MockReader
 		serializer            runtime.Serializer
 		alicloudClientFactory *mockalicloudclient.MockClientFactory
 		ecsClient             *mockalicloudclient.MockECS
@@ -80,27 +76,23 @@ var _ = Describe("Mutating Shoot", func() {
 
 	BeforeEach(func() {
 		ctrl = gomock.NewController(GinkgoT())
-		c = mockclient.NewMockClient(ctrl)
-		apiReader = mockclient.NewMockReader(ctrl)
 
 		scheme = runtime.NewScheme()
 		install.Install(scheme)
 		Expect(controller.AddToScheme(scheme)).To(Succeed())
-
-		mgr = &testutils.FakeManager{
-			Client:    c,
-			Scheme:    scheme,
-			APIReader: apiReader,
-		}
+		Expect(corev1beta1.AddToScheme(scheme)).To(Succeed())
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
 
 		serializer = json.NewSerializerWithOptions(json.DefaultMetaFactory, scheme, scheme, json.SerializerOptions{})
 		alicloudClientFactory = mockalicloudclient.NewMockClientFactory(ctrl)
 		ecsClient = mockalicloudclient.NewMockECS(ctrl)
 		ctx = context.TODO()
 
-		mutator = alimutator.NewShootMutatorWithDeps(mgr, alicloudClientFactory)
-
 		secretBinding = &corev1beta1.SecretBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: namespace,
+			},
 			SecretRef: corev1.SecretReference{
 				Name:      name,
 				Namespace: namespace,
@@ -140,6 +132,7 @@ var _ = Describe("Mutating Shoot", func() {
 
 		configJson = expectEncode(runtime.Encode(serializer, config))
 		cloudProfile = &corev1beta1.CloudProfile{
+			ObjectMeta: metav1.ObjectMeta{Name: "alicloud"},
 			Spec: corev1beta1.CloudProfileSpec{
 				ProviderConfig: &runtime.RawExtension{
 					Raw: configJson,
@@ -231,35 +224,19 @@ var _ = Describe("Mutating Shoot", func() {
 				Region:           regionId,
 			},
 		}
+
+		c := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(cloudProfile, secretBinding).Build()
+		apiReader := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+		mgr := &testutils.FakeManager{Client: c, Scheme: scheme, APIReader: apiReader}
+		mutator = alimutator.NewShootMutatorWithDeps(mgr, alicloudClientFactory)
 	})
 	AfterEach(func() {
 		ctrl.Finish()
 	})
 	Context("#ControlPlaneConfig", func() {
 		It("should default EnableADController true if EnableADController is not set when creating a shoot ", func() {
-			gomock.InOrder(
-				c.EXPECT().Get(ctx, client.ObjectKey{Name: "alicloud"}, gomock.AssignableToTypeOf(&corev1beta1.CloudProfile{})).DoAndReturn(
-					func(_ context.Context, _ client.ObjectKey, obj *corev1beta1.CloudProfile, _ ...client.GetOption) error {
-						*obj = *cloudProfile
-						return nil
-					},
-				),
-				c.EXPECT().Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, gomock.AssignableToTypeOf(&corev1beta1.SecretBinding{})).DoAndReturn(
-					func(_ context.Context, _ client.ObjectKey, obj *corev1beta1.SecretBinding, _ ...client.GetOption) error {
-						*obj = *secretBinding
-						return nil
-					},
-				),
-				apiReader.EXPECT().Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, gomock.AssignableToTypeOf(&corev1.Secret{})).DoAndReturn(
-					func(_ context.Context, _ client.ObjectKey, obj *corev1.Secret, _ ...client.GetOption) error {
-						*obj = *secret
-						return nil
-					},
-				),
-
-				alicloudClientFactory.EXPECT().NewECSClient(regionId, accessKeyID, accessKeySecret).Return(ecsClient, nil),
-				ecsClient.EXPECT().CheckIfImageExists(imageId).Return(false, nil),
-			)
+			alicloudClientFactory.EXPECT().NewECSClient(regionId, accessKeyID, accessKeySecret).Return(ecsClient, nil)
+			ecsClient.EXPECT().CheckIfImageExists(imageId).Return(false, nil)
 			err := mutator.Mutate(ctx, newShoot, nil)
 			Expect(err).NotTo(HaveOccurred())
 			cpConfig := &apisalicloudv1alpha1.ControlPlaneConfig{}
@@ -282,30 +259,9 @@ var _ = Describe("Mutating Shoot", func() {
 	})
 	Context("#Encrypted System Disk", func() {
 		It("should set encrypted flag as true for new shoot ", func() {
-			gomock.InOrder(
-				c.EXPECT().Get(ctx, client.ObjectKey{Name: "alicloud"}, gomock.AssignableToTypeOf(&corev1beta1.CloudProfile{})).DoAndReturn(
-					func(_ context.Context, _ client.ObjectKey, obj *corev1beta1.CloudProfile, _ ...client.GetOption) error {
-						*obj = *cloudProfile
-						return nil
-					},
-				),
-				c.EXPECT().Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, gomock.AssignableToTypeOf(&corev1beta1.SecretBinding{})).DoAndReturn(
-					func(_ context.Context, _ client.ObjectKey, obj *corev1beta1.SecretBinding, _ ...client.GetOption) error {
-						*obj = *secretBinding
-						return nil
-					},
-				),
-				apiReader.EXPECT().Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, gomock.AssignableToTypeOf(&corev1.Secret{})).DoAndReturn(
-					func(_ context.Context, _ client.ObjectKey, obj *corev1.Secret, _ ...client.GetOption) error {
-						*obj = *secret
-						return nil
-					},
-				),
-
-				alicloudClientFactory.EXPECT().NewECSClient(regionId, accessKeyID, accessKeySecret).Return(ecsClient, nil),
-				ecsClient.EXPECT().CheckIfImageExists(imageId).Return(false, nil),
-				//ecsClient.EXPECT().CheckIfImageOwnedByAliCloud(imageId).Return(false, nil)
-			)
+			alicloudClientFactory.EXPECT().NewECSClient(regionId, accessKeyID, accessKeySecret).Return(ecsClient, nil)
+			ecsClient.EXPECT().CheckIfImageExists(imageId).Return(false, nil)
+			//ecsClient.EXPECT().CheckIfImageOwnedByAliCloud(imageId).Return(false, nil)
 			err := mutator.Mutate(ctx, newShoot, nil)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(*newShoot.Spec.Provider.Workers[0].Volume.Encrypted).To(BeTrue())
@@ -313,30 +269,9 @@ var _ = Describe("Mutating Shoot", func() {
 			Expect(controllerutils.HasTask(newShoot.Annotations, v1beta1constants.ShootTaskDeployInfrastructure)).To(BeFalse())
 		})
 		It("should set encrypted flag as false for system disk if image is owned by alicloud", func() {
-			gomock.InOrder(
-				c.EXPECT().Get(ctx, client.ObjectKey{Name: "alicloud"}, gomock.AssignableToTypeOf(&corev1beta1.CloudProfile{})).DoAndReturn(
-					func(_ context.Context, _ client.ObjectKey, obj *corev1beta1.CloudProfile, _ ...client.GetOption) error {
-						*obj = *cloudProfile
-						return nil
-					},
-				),
-				c.EXPECT().Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, gomock.AssignableToTypeOf(&corev1beta1.SecretBinding{})).DoAndReturn(
-					func(_ context.Context, _ client.ObjectKey, obj *corev1beta1.SecretBinding, _ ...client.GetOption) error {
-						*obj = *secretBinding
-						return nil
-					},
-				),
-				apiReader.EXPECT().Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, gomock.AssignableToTypeOf(&corev1.Secret{})).DoAndReturn(
-					func(_ context.Context, _ client.ObjectKey, obj *corev1.Secret, _ ...client.GetOption) error {
-						*obj = *secret
-						return nil
-					},
-				),
-
-				alicloudClientFactory.EXPECT().NewECSClient(regionId, accessKeyID, accessKeySecret).Return(ecsClient, nil),
-				ecsClient.EXPECT().CheckIfImageExists(imageId).Return(true, nil),
-				ecsClient.EXPECT().CheckIfImageOwnedByAliCloud(imageId).Return(true, nil),
-			)
+			alicloudClientFactory.EXPECT().NewECSClient(regionId, accessKeyID, accessKeySecret).Return(ecsClient, nil)
+			ecsClient.EXPECT().CheckIfImageExists(imageId).Return(true, nil)
+			ecsClient.EXPECT().CheckIfImageOwnedByAliCloud(imageId).Return(true, nil)
 			err := mutator.Mutate(ctx, newShoot, nil)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(newShoot.Spec.Provider.Workers[0].Volume.Encrypted).To(BeNil())
@@ -360,29 +295,8 @@ var _ = Describe("Mutating Shoot", func() {
 			oldShoot.Spec.Provider.Workers[0].DataVolumes[0].Encrypted = nil
 			newShoot.Spec.Provider.Workers[0].DataVolumes[0].Encrypted = nil
 
-			gomock.InOrder(
-				c.EXPECT().Get(ctx, client.ObjectKey{Name: "alicloud"}, gomock.AssignableToTypeOf(&corev1beta1.CloudProfile{})).DoAndReturn(
-					func(_ context.Context, _ client.ObjectKey, obj *corev1beta1.CloudProfile, _ ...client.GetOption) error {
-						*obj = *cloudProfile
-						return nil
-					},
-				),
-				c.EXPECT().Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, gomock.AssignableToTypeOf(&corev1beta1.SecretBinding{})).DoAndReturn(
-					func(_ context.Context, _ client.ObjectKey, obj *corev1beta1.SecretBinding, _ ...client.GetOption) error {
-						*obj = *secretBinding
-						return nil
-					},
-				),
-				apiReader.EXPECT().Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, gomock.AssignableToTypeOf(&corev1.Secret{})).DoAndReturn(
-					func(_ context.Context, _ client.ObjectKey, obj *corev1.Secret, _ ...client.GetOption) error {
-						*obj = *secret
-						return nil
-					},
-				),
-
-				alicloudClientFactory.EXPECT().NewECSClient(regionId, accessKeyID, accessKeySecret).Return(ecsClient, nil),
-				ecsClient.EXPECT().CheckIfImageExists(imageId).Return(false, nil),
-			)
+			alicloudClientFactory.EXPECT().NewECSClient(regionId, accessKeyID, accessKeySecret).Return(ecsClient, nil)
+			ecsClient.EXPECT().CheckIfImageExists(imageId).Return(false, nil)
 			err := mutator.Mutate(ctx, newShoot, oldShoot)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(*newShoot.Spec.Provider.Workers[1].Volume.Encrypted).To(BeTrue())
@@ -546,30 +460,9 @@ var _ = Describe("Mutating Shoot", func() {
 		})
 
 		It("should disable overlay for a new shoot", func() {
-			gomock.InOrder(
-				c.EXPECT().Get(ctx, client.ObjectKey{Name: "alicloud"}, gomock.AssignableToTypeOf(&corev1beta1.CloudProfile{})).DoAndReturn(
-					func(_ context.Context, _ client.ObjectKey, obj *corev1beta1.CloudProfile, _ ...client.GetOption) error {
-						*obj = *cloudProfile
-						return nil
-					},
-				),
-				c.EXPECT().Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, gomock.AssignableToTypeOf(&corev1beta1.SecretBinding{})).DoAndReturn(
-					func(_ context.Context, _ client.ObjectKey, obj *corev1beta1.SecretBinding, _ ...client.GetOption) error {
-						*obj = *secretBinding
-						return nil
-					},
-				),
-				apiReader.EXPECT().Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, gomock.AssignableToTypeOf(&corev1.Secret{})).DoAndReturn(
-					func(_ context.Context, _ client.ObjectKey, obj *corev1.Secret, _ ...client.GetOption) error {
-						*obj = *secret
-						return nil
-					},
-				),
-
-				alicloudClientFactory.EXPECT().NewECSClient(regionId, accessKeyID, accessKeySecret).Return(ecsClient, nil),
-				ecsClient.EXPECT().CheckIfImageExists(imageId).Return(true, nil),
-				ecsClient.EXPECT().CheckIfImageOwnedByAliCloud(imageId).Return(true, nil),
-			)
+			alicloudClientFactory.EXPECT().NewECSClient(regionId, accessKeyID, accessKeySecret).Return(ecsClient, nil)
+			ecsClient.EXPECT().CheckIfImageExists(imageId).Return(true, nil)
+			ecsClient.EXPECT().CheckIfImageOwnedByAliCloud(imageId).Return(true, nil)
 			err := mutator.Mutate(ctx, newShoot, nil)
 			Expect(err).NotTo(HaveOccurred())
 			var networkConfig, expectedConfig map[string]interface{}
@@ -592,30 +485,9 @@ var _ = Describe("Mutating Shoot", func() {
 		})
 
 		It("should disable overlay for a new shoot with non empty network config", func() {
-			gomock.InOrder(
-				c.EXPECT().Get(ctx, client.ObjectKey{Name: "alicloud"}, gomock.AssignableToTypeOf(&corev1beta1.CloudProfile{})).DoAndReturn(
-					func(_ context.Context, _ client.ObjectKey, obj *corev1beta1.CloudProfile, _ ...client.GetOption) error {
-						*obj = *cloudProfile
-						return nil
-					},
-				),
-				c.EXPECT().Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, gomock.AssignableToTypeOf(&corev1beta1.SecretBinding{})).DoAndReturn(
-					func(_ context.Context, _ client.ObjectKey, obj *corev1beta1.SecretBinding, _ ...client.GetOption) error {
-						*obj = *secretBinding
-						return nil
-					},
-				),
-				apiReader.EXPECT().Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, gomock.AssignableToTypeOf(&corev1.Secret{})).DoAndReturn(
-					func(_ context.Context, _ client.ObjectKey, obj *corev1.Secret, _ ...client.GetOption) error {
-						*obj = *secret
-						return nil
-					},
-				),
-
-				alicloudClientFactory.EXPECT().NewECSClient(regionId, accessKeyID, accessKeySecret).Return(ecsClient, nil),
-				ecsClient.EXPECT().CheckIfImageExists(imageId).Return(true, nil),
-				ecsClient.EXPECT().CheckIfImageOwnedByAliCloud(imageId).Return(true, nil),
-			)
+			alicloudClientFactory.EXPECT().NewECSClient(regionId, accessKeyID, accessKeySecret).Return(ecsClient, nil)
+			ecsClient.EXPECT().CheckIfImageExists(imageId).Return(true, nil)
+			ecsClient.EXPECT().CheckIfImageOwnedByAliCloud(imageId).Return(true, nil)
 			newShoot.Spec.Networking.ProviderConfig = &runtime.RawExtension{
 				Raw: []byte(`{"foo":{"enabled":true}}`),
 			}
@@ -692,30 +564,9 @@ var _ = Describe("Mutating Shoot", func() {
 		})
 
 		It("should disable overlay for a new shoot", func() {
-			gomock.InOrder(
-				c.EXPECT().Get(ctx, client.ObjectKey{Name: "alicloud"}, gomock.AssignableToTypeOf(&corev1beta1.CloudProfile{})).DoAndReturn(
-					func(_ context.Context, _ client.ObjectKey, obj *corev1beta1.CloudProfile, _ ...client.GetOption) error {
-						*obj = *cloudProfile
-						return nil
-					},
-				),
-				c.EXPECT().Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, gomock.AssignableToTypeOf(&corev1beta1.SecretBinding{})).DoAndReturn(
-					func(_ context.Context, _ client.ObjectKey, obj *corev1beta1.SecretBinding, _ ...client.GetOption) error {
-						*obj = *secretBinding
-						return nil
-					},
-				),
-				apiReader.EXPECT().Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, gomock.AssignableToTypeOf(&corev1.Secret{})).DoAndReturn(
-					func(_ context.Context, _ client.ObjectKey, obj *corev1.Secret, _ ...client.GetOption) error {
-						*obj = *secret
-						return nil
-					},
-				),
-
-				alicloudClientFactory.EXPECT().NewECSClient(regionId, accessKeyID, accessKeySecret).Return(ecsClient, nil),
-				ecsClient.EXPECT().CheckIfImageExists(imageId).Return(true, nil),
-				ecsClient.EXPECT().CheckIfImageOwnedByAliCloud(imageId).Return(true, nil),
-			)
+			alicloudClientFactory.EXPECT().NewECSClient(regionId, accessKeyID, accessKeySecret).Return(ecsClient, nil)
+			ecsClient.EXPECT().CheckIfImageExists(imageId).Return(true, nil)
+			ecsClient.EXPECT().CheckIfImageOwnedByAliCloud(imageId).Return(true, nil)
 			err := mutator.Mutate(ctx, newShoot, nil)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(newShoot.Spec.Networking.ProviderConfig).To(Equal(&runtime.RawExtension{

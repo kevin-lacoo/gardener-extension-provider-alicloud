@@ -13,15 +13,12 @@ import (
 	v1beta1constants "github.com/gardener/gardener/pkg/apis/core/v1beta1/constants"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"go.uber.org/mock/gomock"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
 	"github.com/gardener/gardener-extension-provider-alicloud/pkg/apis/config"
 )
-
-const ()
 
 func TestController(t *testing.T) {
 	RegisterFailHandler(Fail)
@@ -34,18 +31,9 @@ var _ = Describe("Ensurer", func() {
 			ClassName: ptr.To("gardener.cloud-fast"),
 			Capacity:  ptr.To(resource.MustParse("25Gi")),
 		}
-		ctrl *gomock.Controller
 
 		dummyContext = gcontext.NewGardenContext(nil, nil)
 	)
-
-	BeforeEach(func() {
-		ctrl = gomock.NewController(GinkgoT())
-	})
-
-	AfterEach(func() {
-		ctrl.Finish()
-	})
 
 	Describe("#EnsureETCD", func() {
 		It("should add or modify elements to etcd-main statefulset", func() {

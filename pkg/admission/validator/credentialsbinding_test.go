@@ -7,18 +7,18 @@ package validator_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 
 	extensionswebhook "github.com/gardener/gardener/extensions/pkg/webhook"
 	"github.com/gardener/gardener/pkg/apis/security"
 	testutils "github.com/gardener/gardener/pkg/utils/test"
-	mockclient "github.com/gardener/gardener/third_party/mock/controller-runtime/client"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"go.uber.org/mock/gomock"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/gardener/gardener-extension-provider-alicloud/pkg/admission/validator"
 	"github.com/gardener/gardener-extension-provider-alicloud/pkg/alicloud"
@@ -34,24 +34,23 @@ var _ = Describe("CredentialsBinding validator", func() {
 		var (
 			credentialsBindingValidator extensionswebhook.Validator
 
-			ctrl      *gomock.Controller
-			mgr       *testutils.FakeManager
-			apiReader *mockclient.MockReader
-
 			ctx                = context.TODO()
 			credentialsBinding *security.CredentialsBinding
 
-			fakeErr = fmt.Errorf("fake err")
+			scheme = runtime.NewScheme()
+			_      = corev1.AddToScheme(scheme)
 		)
 
+		newValidator := func(apiReaderObjects ...client.Object) extensionswebhook.Validator {
+			rb := fakeclient.NewClientBuilder().WithScheme(scheme)
+			if len(apiReaderObjects) > 0 {
+				rb = rb.WithObjects(apiReaderObjects...)
+			}
+			mgr := &testutils.FakeManager{APIReader: rb.Build()}
+			return validator.NewCredentialsBindingValidator(mgr)
+		}
+
 		BeforeEach(func() {
-			ctrl = gomock.NewController(GinkgoT())
-
-			apiReader = mockclient.NewMockReader(ctrl)
-			mgr = &testutils.FakeManager{APIReader: apiReader}
-
-			credentialsBindingValidator = validator.NewCredentialsBindingValidator(mgr)
-
 			credentialsBinding = &security.CredentialsBinding{
 				CredentialsRef: corev1.ObjectReference{
 					Name:       name,
@@ -62,64 +61,56 @@ var _ = Describe("CredentialsBinding validator", func() {
 			}
 		})
 
-		AfterEach(func() {
-			ctrl.Finish()
-		})
-
 		It("should return err when obj is not a CredentialsBinding", func() {
+			credentialsBindingValidator = newValidator()
 			err := credentialsBindingValidator.Validate(ctx, &corev1.Secret{}, nil)
 			Expect(err).To(MatchError("wrong object type *v1.Secret"))
 		})
 
 		It("should return err when oldObj is not a CredentialsBinding", func() {
+			credentialsBindingValidator = newValidator()
 			err := credentialsBindingValidator.Validate(ctx, &security.CredentialsBinding{}, &corev1.Secret{})
 			Expect(err).To(MatchError("wrong object type *v1.Secret for old object"))
 		})
 
 		It("should return err if the CredentialsBinding references unknown credentials type", func() {
+			credentialsBindingValidator = newValidator()
 			credentialsBinding.CredentialsRef.APIVersion = "unknown"
 			err := credentialsBindingValidator.Validate(ctx, credentialsBinding, nil)
 			Expect(err).To(MatchError(errors.New(`unsupported credentials reference: version "unknown", kind "Secret"`)))
 		})
 
 		It("should return err if it fails to get the corresponding Secret", func() {
-			apiReader.EXPECT().Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, gomock.AssignableToTypeOf(&corev1.Secret{})).Return(fakeErr)
-
+			credentialsBindingValidator = newValidator() // no secret pre-loaded → NotFound
 			err := credentialsBindingValidator.Validate(ctx, credentialsBinding, nil)
-			Expect(err).To(MatchError(fakeErr))
+			Expect(err).To(HaveOccurred())
 		})
 
 		It("should return err when the corresponding Secret is not valid", func() {
-			apiReader.EXPECT().Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, gomock.AssignableToTypeOf(&corev1.Secret{})).
-				DoAndReturn(func(_ context.Context, _ client.ObjectKey, obj *corev1.Secret, _ ...client.GetOption) error {
-					secret := &corev1.Secret{Data: map[string][]byte{
-						"foo": []byte("bar"),
-					}}
-					*obj = *secret
-					return nil
-				})
-
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+				Data:       map[string][]byte{"foo": []byte("bar")},
+			}
+			credentialsBindingValidator = newValidator(secret)
 			err := credentialsBindingValidator.Validate(ctx, credentialsBinding, nil)
 			Expect(err).To(HaveOccurred())
 		})
 
 		It("should succeed when the corresponding Secret is valid", func() {
-			apiReader.EXPECT().Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, gomock.AssignableToTypeOf(&corev1.Secret{})).
-				DoAndReturn(func(_ context.Context, _ client.ObjectKey, obj *corev1.Secret, _ ...client.GetOption) error {
-					secret := &corev1.Secret{Data: map[string][]byte{
-						alicloud.AccessKeyID:     []byte(strings.Repeat("a", 16)),
-						alicloud.AccessKeySecret: []byte(strings.Repeat("b", 30)),
-					}}
-					*obj = *secret
-					return nil
-				})
-
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+				Data: map[string][]byte{
+					alicloud.AccessKeyID:     []byte(strings.Repeat("a", 16)),
+					alicloud.AccessKeySecret: []byte(strings.Repeat("b", 30)),
+				},
+			}
+			credentialsBindingValidator = newValidator(secret)
 			Expect(credentialsBindingValidator.Validate(ctx, credentialsBinding, nil)).To(Succeed())
 		})
 
 		It("should return nil when the CredentialsBinding did not change", func() {
+			credentialsBindingValidator = newValidator()
 			old := credentialsBinding.DeepCopy()
-
 			Expect(credentialsBindingValidator.Validate(ctx, credentialsBinding, old)).To(Succeed())
 		})
 	})
