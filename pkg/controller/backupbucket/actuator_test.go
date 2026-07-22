@@ -12,7 +12,6 @@ import (
 	"github.com/gardener/gardener/extensions/pkg/controller/backupbucket"
 	extensionsv1alpha1 "github.com/gardener/gardener/pkg/apis/extensions/v1alpha1"
 	testutils "github.com/gardener/gardener/pkg/utils/test"
-	mockclient "github.com/gardener/gardener/third_party/mock/controller-runtime/client"
 	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -20,7 +19,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/gardener/gardener-extension-provider-alicloud/pkg/alicloud"
@@ -42,9 +41,7 @@ const (
 var _ = Describe("Actuator", func() {
 	var (
 		ctrl                  *gomock.Controller
-		c                     *mockclient.MockClient
 		mgr                   *testutils.FakeManager
-		sw                    *mockclient.MockStatusWriter
 		a                     backupbucket.Actuator
 		alicloudClientFactory *mockalicloudclient.MockClientFactory
 		ossClient             *mockalicloudclient.MockOSS
@@ -61,17 +58,10 @@ var _ = Describe("Actuator", func() {
 		Expect(extensionsv1alpha1.AddToScheme(scheme)).To(Succeed())
 		Expect(apisalicloudv1alpha1.AddToScheme(scheme)).To(Succeed())
 		Expect(apisali.AddToScheme(scheme)).To(Succeed())
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
 
-		c = mockclient.NewMockClient(ctrl)
-		mgr = &testutils.FakeManager{Client: c}
-		c.EXPECT().Scheme().Return(scheme).MaxTimes(1)
-
-		sw = mockclient.NewMockStatusWriter(ctrl)
 		alicloudClientFactory = mockalicloudclient.NewMockClientFactory(ctrl)
 		ossClient = mockalicloudclient.NewMockOSS(ctrl)
-
-		c.EXPECT().Status().Return(sw).AnyTimes()
-		sw.EXPECT().Patch(gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
 
 		ctx = context.Background()
 		logger = log.Log.WithName("test")
@@ -88,6 +78,8 @@ var _ = Describe("Actuator", func() {
 			},
 		}
 
+		c := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+		mgr = &testutils.FakeManager{Client: c}
 		a = NewActuator(mgr, alicloudClientFactory)
 	})
 
@@ -109,13 +101,6 @@ var _ = Describe("Actuator", func() {
 					Region:    region,
 				},
 			}
-
-			c.EXPECT().Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, gomock.AssignableToTypeOf(&corev1.Secret{})).DoAndReturn(
-				func(_ context.Context, _ client.ObjectKey, obj *corev1.Secret, _ ...client.GetOption) error {
-					*obj = *secret
-					return nil
-				},
-			)
 		})
 
 		Context("when creation of alicloud's oss client fails", func() {
@@ -500,13 +485,6 @@ var _ = Describe("Actuator", func() {
 					Region:    region,
 				},
 			}
-
-			c.EXPECT().Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, gomock.AssignableToTypeOf(&corev1.Secret{})).DoAndReturn(
-				func(_ context.Context, _ client.ObjectKey, obj *corev1.Secret, _ ...client.GetOption) error {
-					*obj = *secret
-					return nil
-				},
-			)
 		})
 
 		Context("when creation of alicloud's oss client fails", func() {

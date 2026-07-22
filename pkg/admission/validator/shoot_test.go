@@ -14,7 +14,6 @@ import (
 
 	"github.com/gardener/gardener/pkg/apis/core"
 	securityv1alpha1 "github.com/gardener/gardener/pkg/apis/security/v1alpha1"
-	mockclient "github.com/gardener/gardener/third_party/mock/controller-runtime/client"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"go.uber.org/mock/gomock"
@@ -29,6 +28,42 @@ import (
 	mockaliclient "github.com/gardener/gardener-extension-provider-alicloud/pkg/controller/infrastructure/infraflow/aliclient/mock"
 )
 
+// fakeReader implements client.Reader by storing objects keyed by namespace/name.
+type fakeReader struct {
+	objects map[string]client.Object
+}
+
+func newFakeReader(objs ...client.Object) *fakeReader {
+	r := &fakeReader{objects: make(map[string]client.Object)}
+	for _, o := range objs {
+		key := o.GetNamespace() + "/" + o.GetName()
+		r.objects[key] = o
+	}
+	return r
+}
+
+func (f *fakeReader) Get(_ context.Context, key client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
+	stored, ok := f.objects[key.Namespace+"/"+key.Name]
+	if !ok {
+		return fmt.Errorf("object %s/%s not found", key.Namespace, key.Name)
+	}
+	switch t := obj.(type) {
+	case *core.SecretBinding:
+		*t = *stored.(*core.SecretBinding)
+	case *securityv1alpha1.CredentialsBinding:
+		*t = *stored.(*securityv1alpha1.CredentialsBinding)
+	case *corev1.Secret:
+		*t = *stored.(*corev1.Secret)
+	default:
+		return fmt.Errorf("unsupported type %T", obj)
+	}
+	return nil
+}
+
+func (f *fakeReader) List(_ context.Context, _ client.ObjectList, _ ...client.ListOption) error {
+	return nil
+}
+
 var _ = Describe("shoot.validateVSwitchCIDRConflict", func() {
 	const (
 		shootNamespace = "shoot--project--test"
@@ -42,7 +77,6 @@ var _ = Describe("shoot.validateVSwitchCIDRConflict", func() {
 
 	var (
 		ctrl      *gomock.Controller
-		apiReader *mockclient.MockReader
 		mockActor *mockaliclient.MockActor
 		ctx       context.Context
 
@@ -55,10 +89,10 @@ var _ = Describe("shoot.validateVSwitchCIDRConflict", func() {
 		ctrl = gomock.NewController(GinkgoT())
 		ctx = context.TODO()
 
-		apiReader = mockclient.NewMockReader(ctrl)
 		mockActor = mockaliclient.NewMockActor(ctrl)
 
 		providerSecret = &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Namespace: shootNamespace, Name: secretName},
 			Data: map[string][]byte{
 				provideralicloud.AccessKeyID:     []byte(akID),
 				provideralicloud.AccessKeySecret: []byte(akSecret),
@@ -73,8 +107,13 @@ var _ = Describe("shoot.validateVSwitchCIDRConflict", func() {
 			},
 		}
 
+		secretBinding := &core.SecretBinding{
+			ObjectMeta: metav1.ObjectMeta{Namespace: shootNamespace, Name: bindingName},
+			SecretRef:  corev1.SecretReference{Namespace: shootNamespace, Name: secretName},
+		}
+
 		s = &shoot{
-			apiReader: apiReader,
+			apiReader: newFakeReader(secretBinding, providerSecret),
 			newActorFn: func(_, _, _ string) (aliclient.Actor, error) {
 				return mockActor, nil
 			},
@@ -84,24 +123,6 @@ var _ = Describe("shoot.validateVSwitchCIDRConflict", func() {
 	AfterEach(func() {
 		ctrl.Finish()
 	})
-
-	expectSecretBindingLookup := func() {
-		secretBinding := &core.SecretBinding{
-			SecretRef: corev1.SecretReference{Namespace: shootNamespace, Name: secretName},
-		}
-		apiReader.EXPECT().
-			Get(ctx, client.ObjectKey{Namespace: shootNamespace, Name: bindingName}, gomock.AssignableToTypeOf(&core.SecretBinding{})).
-			DoAndReturn(func(_ context.Context, _ client.ObjectKey, obj *core.SecretBinding, _ ...client.GetOption) error {
-				*obj = *secretBinding
-				return nil
-			})
-		apiReader.EXPECT().
-			Get(ctx, client.ObjectKey{Namespace: shootNamespace, Name: secretName}, gomock.AssignableToTypeOf(&corev1.Secret{})).
-			DoAndReturn(func(_ context.Context, _ client.ObjectKey, obj *corev1.Secret, _ ...client.GetOption) error {
-				*obj = *providerSecret
-				return nil
-			})
-	}
 
 	zones := func(cidrs ...string) []apisalicloud.Zone {
 		var zs []apisalicloud.Zone
@@ -116,7 +137,6 @@ var _ = Describe("shoot.validateVSwitchCIDRConflict", func() {
 
 	Describe("CIDR conflict detection", func() {
 		It("should return nil when no existing vswitches in VPC", func() {
-			expectSecretBindingLookup()
 			mockActor.EXPECT().FindVSwitchesByVPC(ctx, testVPCID).Return([]*aliclient.VSwitch{}, nil)
 
 			err := s.validateVSwitchCIDRConflict(ctx, baseShoot, testVPCID, zones("192.168.1.0/24"), 0)
@@ -124,7 +144,6 @@ var _ = Describe("shoot.validateVSwitchCIDRConflict", func() {
 		})
 
 		It("should return nil when zone CIDR does not overlap any existing vswitch", func() {
-			expectSecretBindingLookup()
 			mockActor.EXPECT().FindVSwitchesByVPC(ctx, testVPCID).Return([]*aliclient.VSwitch{
 				{VSwitchId: "vsw-other", CidrBlock: "192.168.2.0/24"},
 			}, nil)
@@ -134,7 +153,6 @@ var _ = Describe("shoot.validateVSwitchCIDRConflict", func() {
 		})
 
 		It("should return field.Invalid when zone CIDR exactly matches an existing vswitch", func() {
-			expectSecretBindingLookup()
 			mockActor.EXPECT().FindVSwitchesByVPC(ctx, testVPCID).Return([]*aliclient.VSwitch{
 				{VSwitchId: "vsw-existing", CidrBlock: "192.168.1.0/24"},
 			}, nil)
@@ -147,7 +165,6 @@ var _ = Describe("shoot.validateVSwitchCIDRConflict", func() {
 		})
 
 		It("should return field.Invalid when zone CIDR is a subset of an existing vswitch CIDR", func() {
-			expectSecretBindingLookup()
 			mockActor.EXPECT().FindVSwitchesByVPC(ctx, testVPCID).Return([]*aliclient.VSwitch{
 				{VSwitchId: "vsw-large", CidrBlock: "192.168.0.0/16"},
 			}, nil)
@@ -158,19 +175,16 @@ var _ = Describe("shoot.validateVSwitchCIDRConflict", func() {
 		})
 
 		It("should use startIndex to produce correct field path for newly added zones", func() {
-			expectSecretBindingLookup()
 			mockActor.EXPECT().FindVSwitchesByVPC(ctx, testVPCID).Return([]*aliclient.VSwitch{
 				{VSwitchId: "vsw-b", CidrBlock: "192.168.2.0/24"},
 			}, nil)
 
-			// zones[1] is newly added (startIndex=1)
 			err := s.validateVSwitchCIDRConflict(ctx, baseShoot, testVPCID, zones("192.168.2.0/24"), 1)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("networks.zones[1].workers"))
 		})
 
 		It("should return InternalError when FindVSwitchesByVPC fails", func() {
-			expectSecretBindingLookup()
 			mockActor.EXPECT().FindVSwitchesByVPC(ctx, testVPCID).Return(nil, fmt.Errorf("api error"))
 
 			err := s.validateVSwitchCIDRConflict(ctx, baseShoot, testVPCID, zones("192.168.1.0/24"), 0)
@@ -179,7 +193,6 @@ var _ = Describe("shoot.validateVSwitchCIDRConflict", func() {
 		})
 
 		It("should skip zones with empty CIDR", func() {
-			expectSecretBindingLookup()
 			mockActor.EXPECT().FindVSwitchesByVPC(ctx, testVPCID).Return([]*aliclient.VSwitch{
 				{VSwitchId: "vsw-x", CidrBlock: "192.168.1.0/24"},
 			}, nil)
@@ -197,6 +210,7 @@ var _ = Describe("shoot.validateVSwitchCIDRConflict", func() {
 			sh.Spec.CredentialsBindingName = ptr.To(bindingName)
 
 			credentialsBinding := &securityv1alpha1.CredentialsBinding{
+				ObjectMeta: metav1.ObjectMeta{Namespace: shootNamespace, Name: bindingName},
 				CredentialsRef: corev1.ObjectReference{
 					APIVersion: corev1.SchemeGroupVersion.String(),
 					Kind:       "Secret",
@@ -204,18 +218,7 @@ var _ = Describe("shoot.validateVSwitchCIDRConflict", func() {
 					Name:       secretName,
 				},
 			}
-			apiReader.EXPECT().
-				Get(ctx, client.ObjectKey{Namespace: shootNamespace, Name: bindingName}, gomock.AssignableToTypeOf(&securityv1alpha1.CredentialsBinding{})).
-				DoAndReturn(func(_ context.Context, _ client.ObjectKey, obj *securityv1alpha1.CredentialsBinding, _ ...client.GetOption) error {
-					*obj = *credentialsBinding
-					return nil
-				})
-			apiReader.EXPECT().
-				Get(ctx, client.ObjectKey{Namespace: shootNamespace, Name: secretName}, gomock.AssignableToTypeOf(&corev1.Secret{})).
-				DoAndReturn(func(_ context.Context, _ client.ObjectKey, obj *corev1.Secret, _ ...client.GetOption) error {
-					*obj = *providerSecret
-					return nil
-				})
+			s.apiReader = newFakeReader(credentialsBinding, providerSecret)
 			mockActor.EXPECT().FindVSwitchesByVPC(ctx, testVPCID).Return([]*aliclient.VSwitch{}, nil)
 
 			err := s.validateVSwitchCIDRConflict(ctx, sh, testVPCID, zones("192.168.1.0/24"), 0)

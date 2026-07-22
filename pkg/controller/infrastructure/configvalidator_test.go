@@ -14,7 +14,6 @@ import (
 	extensionsv1alpha1 "github.com/gardener/gardener/pkg/apis/extensions/v1alpha1"
 	testutils "github.com/gardener/gardener/pkg/utils/test"
 	. "github.com/gardener/gardener/pkg/utils/test/matchers"
-	mockclient "github.com/gardener/gardener/third_party/mock/controller-runtime/client"
 	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -26,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/gardener/gardener-extension-provider-alicloud/pkg/alicloud"
@@ -50,7 +50,7 @@ const (
 var _ = Describe("ConfigValidator", func() {
 	var (
 		ctrl        *gomock.Controller
-		c           *mockclient.MockClient
+		c           client.Client
 		ctx         context.Context
 		logger      logr.Logger
 		actor       *mockaliclient.MockActor
@@ -64,14 +64,11 @@ var _ = Describe("ConfigValidator", func() {
 
 	BeforeEach(func() {
 		ctrl = gomock.NewController(GinkgoT())
-		c = mockclient.NewMockClient(ctrl)
 		ctx = context.TODO()
 		logger = log.Log.WithName("test")
-		mgr = &testutils.FakeManager{Client: c}
 
 		actorFactor = mockaliclient.NewMockFactory(ctrl)
 		actor = mockaliclient.NewMockActor(ctrl)
-		cv = NewConfigValidator(mgr, logger, actorFactor)
 
 		infra = &extensionsv1alpha1.Infrastructure{
 			ObjectMeta: metav1.ObjectMeta{
@@ -111,14 +108,13 @@ var _ = Describe("ConfigValidator", func() {
 			},
 		}
 
-		c.EXPECT().Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, gomock.AssignableToTypeOf(&corev1.Secret{})).DoAndReturn(
-			func(_ context.Context, _ client.ObjectKey, obj *corev1.Secret, _ ...client.GetOption) error {
-				*obj = *secret
-				return nil
-			},
-		)
-		actorFactor.EXPECT().NewActor(accessKeyID, secretAccessKey, region).Return(actor, nil)
+		scheme := runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		c = fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+		mgr = &testutils.FakeManager{Client: c}
+		cv = NewConfigValidator(mgr, logger, actorFactor)
 
+		actorFactor.EXPECT().NewActor(accessKeyID, secretAccessKey, region).Return(actor, nil)
 	})
 
 	AfterEach(func() {

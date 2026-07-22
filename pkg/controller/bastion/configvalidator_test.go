@@ -13,7 +13,6 @@ import (
 	"github.com/gardener/gardener/pkg/extensions"
 	testutils "github.com/gardener/gardener/pkg/utils/test"
 	. "github.com/gardener/gardener/pkg/utils/test/matchers"
-	mockclient "github.com/gardener/gardener/third_party/mock/controller-runtime/client"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	gstruct "github.com/onsi/gomega/gstruct"
@@ -22,7 +21,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/gardener/gardener-extension-provider-alicloud/pkg/alicloud"
 	aliclient "github.com/gardener/gardener-extension-provider-alicloud/pkg/alicloud/client"
@@ -43,7 +42,6 @@ const (
 var _ = Describe("ConfigValidator", func() {
 	var (
 		ctrl                  *gomock.Controller
-		c                     *mockclient.MockClient
 		mgr                   *testutils.FakeManager
 		alicloudClientFactory *mockalicloudclient.MockClientFactory
 		ecsClient             *mockalicloudclient.MockECS
@@ -53,33 +51,19 @@ var _ = Describe("ConfigValidator", func() {
 		cv                    bastion.ConfigValidator
 		bastion               *extensionsv1alpha1.Bastion
 		cluster               *extensions.Cluster
-		cloudProfile          *corev1beta1.CloudProfile
-		secretBinding         *corev1beta1.SecretBinding
 		secret                *corev1.Secret
 	)
 
 	BeforeEach(func() {
 		ctrl = gomock.NewController(GinkgoT())
 		defer ctrl.Finish()
-		c = mockclient.NewMockClient(ctrl)
 		alicloudClientFactory = mockalicloudclient.NewMockClientFactory(ctrl)
 		ecsClient = mockalicloudclient.NewMockECS(ctrl)
 		vpcClient = mockalicloudclient.NewMockVPC(ctrl)
 		ctx = context.TODO()
 
-		mgr = &testutils.FakeManager{Client: c}
-
-		cv = NewConfigValidator(mgr, alicloudClientFactory)
-
 		bastion = &extensionsv1alpha1.Bastion{}
 		cluster = &extensions.Cluster{}
-
-		secretBinding = &corev1beta1.SecretBinding{
-			SecretRef: corev1.SecretReference{
-				Name:      name,
-				Namespace: namespace,
-			},
-		}
 
 		secret = &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
@@ -109,8 +93,7 @@ var _ = Describe("ConfigValidator", func() {
 			},
 			MachineImages: []apialicloud.MachineImage{{
 				ID: id,
-			},
-			},
+			}},
 		}
 
 		worker = &extensionsv1alpha1.Worker{
@@ -120,7 +103,6 @@ var _ = Describe("ConfigValidator", func() {
 				},
 			},
 		}
-
 	})
 
 	AfterEach(func() {
@@ -130,16 +112,20 @@ var _ = Describe("ConfigValidator", func() {
 	Describe("#Validate", func() {
 		BeforeEach(func() {
 			cluster = createClusters()
-			key := client.ObjectKey{Namespace: cluster.ObjectMeta.Name, Name: cluster.Shoot.Name}
 
-			c.EXPECT().Get(ctx, key, gomock.AssignableToTypeOf(&extensionsv1alpha1.Worker{})).DoAndReturn(
-				func(_ context.Context, _ client.ObjectKey, obj *extensionsv1alpha1.Worker, _ ...client.GetOption) error {
-					worker.DeepCopyInto(obj)
-					return nil
-				})
-			c.EXPECT().Get(ctx, client.ObjectKey{Namespace: cluster.ObjectMeta.Name, Name: v1beta1constants.SecretNameCloudProvider}, gomock.AssignableToTypeOf(&corev1beta1.CloudProfile{})).DoAndReturn(clientGet(cloudProfile))
-			c.EXPECT().Get(ctx, key, gomock.AssignableToTypeOf(&corev1beta1.SecretBinding{})).DoAndReturn(clientGet(secretBinding))
-			c.EXPECT().Get(ctx, key, gomock.AssignableToTypeOf(&corev1.Secret{})).DoAndReturn(clientGet(secret))
+			worker.Name = cluster.Shoot.Name
+			worker.Namespace = cluster.ObjectMeta.Name
+
+			cpSecret := secret.DeepCopy()
+			cpSecret.Name = v1beta1constants.SecretNameCloudProvider
+			cpSecret.Namespace = cluster.ObjectMeta.Name
+
+			scheme := runtime.NewScheme()
+			Expect(corev1.AddToScheme(scheme)).To(Succeed())
+			Expect(extensionsv1alpha1.AddToScheme(scheme)).To(Succeed())
+			fakeClient := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(worker, cpSecret).Build()
+			mgr = &testutils.FakeManager{Client: fakeClient}
+			cv = NewConfigValidator(mgr, alicloudClientFactory)
 			alicloudClientFactory.EXPECT().NewECSClient(region, accessKeyID, accessKeySecret).Return(ecsClient, nil)
 			alicloudClientFactory.EXPECT().NewVPCClient(region, accessKeyID, accessKeySecret).Return(vpcClient, nil)
 		})
@@ -237,19 +223,5 @@ func createClusters() *extensions.Cluster {
 				Region: region,
 			},
 		},
-	}
-}
-
-func clientGet(result client.Object) interface{} {
-	return func(_ context.Context, _ client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
-		switch obj.(type) {
-		case *corev1.Secret:
-			*obj.(*corev1.Secret) = *result.(*corev1.Secret)
-		case *corev1beta1.CloudProfile:
-			*obj.(*corev1beta1.CloudProfile) = *result.(*corev1beta1.CloudProfile)
-		case *corev1beta1.SecretBinding:
-			*obj.(*corev1beta1.SecretBinding) = *result.(*corev1beta1.SecretBinding)
-		}
-		return nil
 	}
 }
